@@ -21,11 +21,11 @@ jobs:
       - name: Configure
         run: >
           cmake --preset "${{ matrix.preset }}"
-          -DGREENSOCS_GIT="https://github.com/quic/"
           -DLIBQEMU_TARGETS="aarch64;hexagon"
 
       - name: Build
-        run: cmake --build --preset "${{ matrix.preset }}" --parallel $(sysctl -n hw.logicalcpu)
+        run: cmake --build --preset "${{ matrix.preset }}" --parallel $(sysctl -n
+          hw.logicalcpu)
 
       - name: Test
         run: ctest --preset "${{ matrix.preset }}"
