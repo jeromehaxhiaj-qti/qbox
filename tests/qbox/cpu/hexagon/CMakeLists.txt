@@ -4,8 +4,6 @@
 qbox_build_firmware_bin(ld-st-mmio             hexagon ${CMAKE_CURRENT_SOURCE_DIR})
 qbox_build_firmware_bin(hex-reset              hexagon ${CMAKE_CURRENT_SOURCE_DIR})
 qbox_build_firmware_bin(load-store-test        hexagon ${CMAKE_CURRENT_SOURCE_DIR})
-qbox_build_firmware_bin(hexagon_smmu_firmware  hexagon ${CMAKE_CURRENT_SOURCE_DIR}
-    EXTRA_LD_ARGS --defsym TESTER_ADDR=0x40000 --defsym REG_DEBUG=0x28 --defsym PAGE_SIZE=0x1000)
 
 qbox_add_cpu_test(hexagon-ld-st-mmio-test 100 ld-st-mmio.cc)
 qbox_attach_firmware(hexagon-ld-st-mmio-test ld-st-mmio)
@@ -36,5 +34,16 @@ target_compile_definitions(${HEXAGON_STANDALONE_TEST_NAME} PRIVATE
 
 add_test(NAME hexagon-${HEXAGON_STANDALONE_TEST_NAME} COMMAND ${HEXAGON_STANDALONE_TEST_NAME})
 
-qbox_add_cpu_test(hexagon-smmu-stress-test-v2 100 hexagon_smmu_stress_test_v2.cc)
-qbox_attach_firmware(hexagon-smmu-stress-test-v2 hexagon_smmu_firmware)
+# hexagon_smmu_firmware.s uses V73 ops (tlbw, dmwait, dmlink) that older
+# Hexagon LLVM backends (e.g. Ubuntu's stock llvm-18) don't recognise. See
+# QQVPQSP-714. Only build it on platforms where a recent-enough Hexagon
+# backend ships: macOS via Homebrew's `llvm`, and Windows via MSYS2's
+# bundled LLVM.
+if(APPLE OR WIN32)
+    qbox_build_firmware_bin(hexagon_smmu_firmware  hexagon ${CMAKE_CURRENT_SOURCE_DIR}
+        EXTRA_LD_ARGS --defsym TESTER_ADDR=0x40000 --defsym REG_DEBUG=0x28 --defsym PAGE_SIZE=0x1000)
+    qbox_add_cpu_test(hexagon-smmu-stress-test-v2 100 hexagon_smmu_stress_test_v2.cc)
+    qbox_attach_firmware(hexagon-smmu-stress-test-v2 hexagon_smmu_firmware)
+else()
+    message(STATUS "Skipping hexagon-smmu-stress-test-v2: requires recent Hexagon LLVM backend (QQVPQSP-714)")
+endif()
