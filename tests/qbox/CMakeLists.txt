@@ -51,8 +51,8 @@ list(APPEND QBOX_CPU_TEST_NUM_CPU_COMBINATION
     if(NOT LLVM_MC OR NOT LLD OR NOT LLVM_OBJCOPY)
         message(FATAL_ERROR
             "Qbox CPU tests require the LLVM toolchain (llvm-mc, ld.lld, llvm-objcopy) "
-            "to assemble test firmware. Install llvm (e.g. `brew install llvm` on macOS, "
-            "or the `llvm`/`lld` packages on Linux) and re-run cmake.\n"
+            "to assemble test firmware. Run scripts/install_dependencies.sh to install "
+            "all required dependencies, then re-run cmake.\n"
             "  llvm-mc: ${LLVM_MC}\n  ld.lld: ${LLD}\n  llvm-objcopy: ${LLVM_OBJCOPY}")
     endif()
 
