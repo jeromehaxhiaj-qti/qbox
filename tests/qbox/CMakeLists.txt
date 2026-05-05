@@ -43,28 +43,95 @@ list(APPEND QBOX_CPU_TEST_NUM_CPU_COMBINATION
     )
 
 
-    FILE(GLOB KEYSTONE_PATCH_FILES "${PROJECT_SOURCE_DIR}/patch/keystone/*.patch")
+    # LLVM toolchain is used to assemble firmware binaries at configure time
+    find_program(LLVM_MC llvm-mc HINTS /opt/homebrew/opt/llvm/bin)
+    find_program(LLD ld.lld HINTS /opt/homebrew/opt/llvm/bin)
+    find_program(LLVM_OBJCOPY llvm-objcopy HINTS /opt/homebrew/opt/llvm/bin)
 
-    message(STATUS "Applying patches to keystone: ${KEYSTONE_PATCH_FILES}")
-
-    if(WIN32)
-        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    if(NOT LLVM_MC OR NOT LLD OR NOT LLVM_OBJCOPY)
+        message(FATAL_ERROR
+            "Qbox CPU tests require the LLVM toolchain (llvm-mc, ld.lld, llvm-objcopy) "
+            "to assemble test firmware. Install llvm (e.g. `brew install llvm` on macOS, "
+            "or the `llvm`/`lld` packages on Linux) and re-run cmake.\n"
+            "  llvm-mc: ${LLVM_MC}\n  ld.lld: ${LLD}\n  llvm-objcopy: ${LLVM_OBJCOPY}")
     endif()
-    cpmfindpackage(
-        NAME keystone
-        GIT_REPOSITORY https://github.com/keystone-engine/keystone.git
-        GIT_TAG 0.9.2
-        GIT_SHALLOW TRUE
-        PATCH_COMMAND ${PATCH_EXEC_CMD} ${PATCH_ARGS} "${KEYSTONE_PATCH_FILES}"
-        UPDATE_DISCONNECTED 1
-        OPTIONS "BUILD_LIBS_ONLY"
-    )
+
+    # qbox_build_firmware_bin(<name> <arch> <src_dir> [EXTRA_LD_ARGS ...])
+    #
+    # Assembles <src_dir>/<name>.S with llvm-mc, links it with ld.lld using
+    # <src_dir>/<name>.ld, and objcopies the result to a raw .bin. Creates a
+    # custom target <name>-firmware that depends on the .bin.
+    #
+    # <arch> is passed to `llvm-mc -arch=` (e.g. aarch64, hexagon, riscv32).
+    # EXTRA_LD_ARGS can supply additional `ld.lld` flags such as `--defsym`.
+    function(qbox_build_firmware_bin name arch src_dir)
+        cmake_parse_arguments(FW "" "" "EXTRA_LD_ARGS" ${ARGN})
+
+        # Accept either name.S or name.s
+        if(EXISTS "${src_dir}/${name}.S")
+            set(src "${src_dir}/${name}.S")
+        elseif(EXISTS "${src_dir}/${name}.s")
+            set(src "${src_dir}/${name}.s")
+        else()
+            message(FATAL_ERROR "qbox_build_firmware_bin: no ${name}.S or ${name}.s in ${src_dir}")
+        endif()
+
+        # Prefer a per-firmware linker script; fall back to a shared firmware.ld
+        # in the same directory so tests that share the same layout don't need
+        # a duplicated .ld file each.
+        if(EXISTS "${src_dir}/${name}.ld")
+            set(ld_script "${src_dir}/${name}.ld")
+        elseif(EXISTS "${src_dir}/firmware.ld")
+            set(ld_script "${src_dir}/firmware.ld")
+        else()
+            message(FATAL_ERROR "qbox_build_firmware_bin: no ${name}.ld or firmware.ld in ${src_dir}")
+        endif()
+        set(obj "${CMAKE_CURRENT_BINARY_DIR}/${name}.o")
+        set(elf "${CMAKE_CURRENT_BINARY_DIR}/${name}.elf")
+        set(bin "${CMAKE_CURRENT_BINARY_DIR}/${name}.bin")
+
+        set(mc_triple_args "-arch=${arch}" -filetype=obj)
+        if("${arch}" STREQUAL "aarch64")
+            list(APPEND mc_triple_args -triple=aarch64-none-elf)
+        endif()
+
+        get_filename_component(src_name "${src}" NAME)
+        add_custom_command(
+            OUTPUT ${obj}
+            COMMAND ${LLVM_MC} ${mc_triple_args} ${src} -o ${obj}
+            DEPENDS ${src}
+            COMMENT "Assembling ${src_name}"
+        )
+
+        add_custom_command(
+            OUTPUT ${elf}
+            COMMAND ${LLD} -T ${ld_script} ${obj} ${FW_EXTRA_LD_ARGS} -o ${elf}
+            DEPENDS ${obj} ${ld_script}
+            COMMENT "Linking ${name}.elf"
+        )
+
+        add_custom_command(
+            OUTPUT ${bin}
+            COMMAND ${LLVM_OBJCOPY} -O binary ${elf} ${bin}
+            DEPENDS ${elf}
+            COMMENT "Creating ${name}.bin"
+        )
+
+        add_custom_target(${name}-firmware DEPENDS ${bin})
+    endfunction()
+
+    # qbox_attach_firmware(<target> <fw_name>)
+    #
+    # Wires a pre-built firmware binary (produced by qbox_build_firmware_bin)
+    # to a test executable: adds the build dependency and defines
+    # FIRMWARE_BIN_PATH so the test knows where to mmap/load the .bin at runtime.
+    function(qbox_attach_firmware target fw_name)
+        add_dependencies(${target} ${fw_name}-firmware)
+        target_compile_definitions(${target} PRIVATE
+            FIRMWARE_BIN_PATH="${CMAKE_CURRENT_BINARY_DIR}/${fw_name}.bin")
+    endfunction()
 
 function(qbox_add_cpu_test target timeout_s)
-    if(NOT ${keystone_FOUND})
-        return()
-    endif()
-
     list(APPEND QBOX_TEST_ACCELS "tcg")
     if ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "arm64")
             list(APPEND QBOX_TEST_ACCELS "hvf")
@@ -88,9 +155,9 @@ function(qbox_add_cpu_test target timeout_s)
     endif()
 
 
-    target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/tests/qbox/include ${keystone_SOURCE_DIR}/include)
+    target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/tests/qbox/include)
 
-    target_link_libraries(${target} PRIVATE cpu_arm_cortexA53 qemu_cpu_hexagon cpu_riscv32 global_peripheral_initiator router reset_gpio gs_memory smmu500 pass exclusive_monitor display plic_sifive ${TARGET_LIBS} keystone hexagon_globalreg)
+    target_link_libraries(${target} PRIVATE cpu_arm_cortexA53 qemu_cpu_hexagon cpu_riscv32 global_peripheral_initiator router reset_gpio gs_memory smmu500 pass exclusive_monitor display plic_sifive ${TARGET_LIBS} hexagon_globalreg)
 
     foreach (accel ${QBOX_TEST_ACCELS})
       foreach(sync_pol ${QBOX_CPU_TEST_SYNC_POLICY_COMBINATION})

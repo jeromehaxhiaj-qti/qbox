@@ -7,9 +7,9 @@
  */
 #include <systemc>
 
-#include <cstdio>
+#include <algorithm>
+#include <mutex>
 #include <vector>
-#include <deque>
 
 #include "test/cpu.h"
 #include "test/tester/dmi.h"
@@ -35,76 +35,6 @@ class CpuArmCortexA53DmiConcurrentInvalTest : public CpuArmTestBench<cpu_arm_cor
 public:
     static constexpr int NUM_WRITES = 1024;
 
-    static constexpr const char* FIRMWARE = R"(
-        _start:
-            ldr x2, =0x%08)" PRIx64 R"(
-            ldr x1, =0x%08)" PRIx64 R"(
-
-            mrs x0, mpidr_el1
-
-            and x3, x0, #0xff
-            and x0, x0, #0xff00
-            lsr x0, x0, #5
-            orr  x0, x0, x3
-
-            lsl x0, x0, #3
-            add x1, x1, x0
-            add x2, x2, x0
-
-            mov x3, #%d
-            mov x4, #0
-
-        loop:
-            # Read/Write on DMI socket
-            ldr x0, [x1]
-            cmp x0, x4
-            b.ne fail
-            add x0, x0, #1
-            str x0, [x1]
-            mov x4, x0
-
-            # Read/Write on DMI socket
-            ldr x0, [x1]
-            cmp x0, x4
-            b.ne fail
-            add x0, x0, #1
-            str x0, [x1]
-            mov x4, x0
-
-            # Do DMI invalidation
-            str x0, [x2]
-
-            # Read/Write on DMI socket
-            ldr x0, [x1]
-            cmp x0, x4
-            b.ne fail
-            add x0, x0, #1
-            str x0, [x1]
-            mov x4, x0
-
-            # Read/Write on DMI socket
-            ldr x0, [x1]
-            cmp x0, x4
-            b.ne fail
-            add x0, x0, #1
-            str x0, [x1]
-            mov x4, x0
-
-            cmp x0, x3
-            b.lt loop
-
-        end:
-            wfi
-            ldr x5, =0x80000000
-            str x5, [x2]
-            b end
-
-        fail:
-            mov x0, -1
-            str x0, [x2]
-            b end
-    )";
-
 private:
     /*
      * Decrease the number of write per CPU when the number of CPUs increases
@@ -121,12 +51,12 @@ public:
     CpuArmCortexA53DmiConcurrentInvalTest(const sc_core::sc_module_name& n)
         : CpuArmTestBench<cpu_arm_cortexA53, CpuTesterDmi>(n), invalidated(p_num_cpu, false)
     {
-        char buf[2048];
         SCP_DEBUG(SCMOD) << "CpuArmCortexA53DmiConcurrentInvalTest constructor";
         m_num_write_per_cpu = NUM_WRITES / p_num_cpu;
 
-        std::snprintf(buf, sizeof(buf), FIRMWARE, CpuTesterDmi::MMIO_ADDR, CpuTesterDmi::DMI_ADDR, m_num_write_per_cpu);
-        set_firmware(buf);
+        load_firmware_binary(FIRMWARE_BIN_PATH, MEM_ADDR,
+                             { static_cast<uint64_t>(CpuTesterDmi::MMIO_ADDR), static_cast<uint64_t>(CpuTesterDmi::DMI_ADDR),
+                               static_cast<uint64_t>(m_num_write_per_cpu) });
     }
 
     virtual ~CpuArmCortexA53DmiConcurrentInvalTest() {}
@@ -205,7 +135,5 @@ public:
         }
     }
 };
-
-constexpr const char* CpuArmCortexA53DmiConcurrentInvalTest::FIRMWARE;
 
 int sc_main(int argc, char* argv[]) { return run_testbench<CpuArmCortexA53DmiConcurrentInvalTest>(argc, argv); }
