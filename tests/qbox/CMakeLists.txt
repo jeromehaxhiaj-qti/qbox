@@ -93,6 +93,26 @@ list(APPEND QBOX_CPU_TEST_NUM_CPU_COMBINATION
         set(mc_triple_args "-arch=${arch}" -filetype=obj)
         if("${arch}" STREQUAL "aarch64")
             list(APPEND mc_triple_args -triple=aarch64-none-elf)
+            set(lld_emulation aarch64elf)
+        elseif("${arch}" STREQUAL "hexagon")
+            set(lld_emulation hexagonelf)
+        elseif("${arch}" STREQUAL "riscv32")
+            set(lld_emulation elf32lriscv)
+        elseif("${arch}" STREQUAL "riscv64")
+            set(lld_emulation elf64lriscv)
+        else()
+            message(FATAL_ERROR "qbox_build_firmware_bin: unsupported arch '${arch}'")
+        endif()
+
+        # On MSYS2/Windows, ld.lld defaults to PE-COFF and ignores -flavor gnu,
+        # so an explicit -m <emulation> is required to force ELF/GNU mode.
+        # Linux/macOS ld.lld already defaults to ELF and older LLDs (e.g.
+        # Ubuntu's llvm-18) don't even know some of the ELF emulation names
+        # (hexagonelf lands first), so we only pass -m on Windows.
+        if(WIN32)
+            set(lld_mode_args -m ${lld_emulation})
+        else()
+            set(lld_mode_args)
         endif()
 
         get_filename_component(src_name "${src}" NAME)
@@ -105,7 +125,7 @@ list(APPEND QBOX_CPU_TEST_NUM_CPU_COMBINATION
 
         add_custom_command(
             OUTPUT ${elf}
-            COMMAND ${LLD} -T ${ld_script} ${obj} ${FW_EXTRA_LD_ARGS} -o ${elf}
+            COMMAND ${LLD} ${lld_mode_args} -T ${ld_script} ${obj} ${FW_EXTRA_LD_ARGS} -o ${elf}
             DEPENDS ${obj} ${ld_script}
             COMMENT "Linking ${name}.elf"
         )
