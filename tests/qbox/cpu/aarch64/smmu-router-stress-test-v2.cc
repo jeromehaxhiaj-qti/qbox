@@ -8,6 +8,7 @@
 
 #include <systemc>
 #include <cstdio>
+#include <fstream>
 #include <vector>
 #include <queue>
 #include <scp/report.h>
@@ -15,7 +16,6 @@
 #include <libgsutils.h>
 #include <cciutils.h>
 #include <argparser.h>
-#include <keystone/keystone.h>
 #include <tlm_utils/tlm_quantumkeeper.h>
 #include "cci/cfg/cci_broker_if.h"
 #include "test/cpu.h"
@@ -570,31 +570,26 @@ private:
     void reconfigure_context_bank(uint32_t cb, uint64_t page_table_addr);
 
 protected:
-    void set_firmware(const char* assembly, uint64_t addr = 0)
+    // Firmware is assembled ahead of time from
+    // smmu-router-stress-test-v2.S — all layout constants are baked in at
+    // build time, so we just load the .bin at 0x0 and the three sub-blobs
+    // (boot @ 0x0, diagnostic @ 0x200, main @ 0x1000) land at their expected
+    // offsets automatically.
+    void load_stress_test_firmware()
     {
-        ks_engine* ks;
-        ks_err err;
-        size_t size, count;
-        uint8_t* fw;
-
-        err = ks_open(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN, &ks);
-
-        if (err != KS_ERR_OK) {
-            SCP_FATAL(()) << "Unable to initialize keystone";
+        std::ifstream file(FIRMWARE_BIN_PATH, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            SCP_FATAL(()) << "Failed to open firmware file: " << FIRMWARE_BIN_PATH;
+            TEST_FAIL("Failed to open firmware file");
         }
-
-        if (ks_asm(ks, assembly, addr, &fw, &size, &count) != KS_ERR_OK || size == 0) {
-            std::cerr << assembly << "\n";
-            std::cerr << "errno: " << ks_errno(ks) << "\n";
-            std::cerr << "error: " << ks_strerror(ks_errno(ks)) << "\n";
-            SCP_INFO() << assembly;
-            TEST_FAIL("Unable to assemble the test firmware\n");
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        std::vector<uint8_t> data(size);
+        if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
+            SCP_FATAL(()) << "Failed to read firmware file: " << FIRMWARE_BIN_PATH;
+            TEST_FAIL("Failed to read firmware file");
         }
-
-        m_mem.load.ptr_load(fw, addr, size);
-
-        ks_free(fw);
-        ks_close(ks);
+        m_mem.load.ptr_load(data.data(), MEM_ADDR, size);
     }
 
 public:
@@ -732,7 +727,7 @@ public:
         SCP_INFO(()) << "  TESTER: 0x" << std::hex << TESTER_ADDR;
         SCP_INFO(()) << "  VIRTUAL_TEST: 0x" << std::hex << VIRTUAL_TEST_ADDR;
 
-        generate_tester_controlled_firmware();
+        load_stress_test_firmware();
 
         SC_THREAD(configure_test);
     }
@@ -1131,247 +1126,6 @@ public:
 
         SCP_INFO(()) << "Unmap complete for CPU " << cpu << ", high VA CB" << high_va_cb << " disabled.";
         m_cpu_to_region[cpu] = 0xFFFFFFFF;
-    }
-
-    void generate_tester_controlled_firmware()
-    {
-        SCP_INFO(()) << "Generating tester-controlled firmware with proper layout";
-
-        // 1. BOOT LOADER at 0x0 - Just jumps to main firmware
-        static constexpr const char* BOOT_LOADER = R"(
-            // BOOT LOADER at 0x0
-            boot_start:
-                // Jump to main firmware at 0x1000
-                movz x0, #0x%04)" PRIx32 R"(  // Main firmware address (0x1000)
-                br x0                         // Jump to main firmware
-        )";
-
-        char boot_buf[strlen(BOOT_LOADER) + 1000];
-        std::snprintf(boot_buf, sizeof(boot_buf), BOOT_LOADER, static_cast<uint32_t>(MAIN_FIRMWARE_ADDR));
-        set_firmware(boot_buf, BOOT_ADDR);
-
-        // 2. DIAGNOSTIC HANDLER at 0x200 - Error reporting
-        static constexpr const char* DIAGNOSTIC_HANDLER = R"(
-            // DIAGNOSTIC ERROR HANDLER at 0x200
-            diagnostic_error:
-                // Get CPU ID
-                mrs x0, mpidr_el1
-                and x0, x0, #0xff
-                
-                // Calculate tester base address for this CPU
-                ldr x1, =0x%08)" PRIx64 R"(    // TESTER_ADDR
-                mov x2, #0x100                 // Register size per CPU
-                mul x2, x0, x2                 // CPU offset
-                add x1, x1, x2                // x1 = CPU-specific tester base
-                
-                // Send error message: 0xE000 + CPU_ID
-                mov x2, #0xE000
-                orr x2, x2, x0                // Error code + CPU ID
-                str x2, [x1, #0x28]           // Write to REG_DEBUG
-                
-                // Stop the test with error
-                mov x0, #1                    // Exit with error
-                hlt #0                        // Halt with error
-                
-            diagnostic_loop:
-                wfi
-                b diagnostic_loop
-        )";
-
-        char diagnostic_buf[strlen(DIAGNOSTIC_HANDLER) + 1000];
-        std::snprintf(diagnostic_buf, sizeof(diagnostic_buf), DIAGNOSTIC_HANDLER, TESTER_ADDR);
-        set_firmware(diagnostic_buf, DIAGNOSTIC_ADDR);
-
-        // 3. MAIN FIRMWARE at 0x1000 - The actual test logic
-        static constexpr const char* MAIN_FIRMWARE = R"(
-            // MAIN FIRMWARE at 0x1000
-            main_start:
-                // Get CPU ID
-                mrs x0, mpidr_el1
-                and x0, x0, #0xff
-                mov x20, x0                    // Save CPU ID in x20
-
-                // Calculate tester base address for this CPU
-                ldr x1, =0x%08)" PRIx64 R"(    // TESTER_ADDR
-                mov x2, #0x100                 // Register size per CPU
-                mul x2, x20, x2                // CPU offset
-                add x21, x1, x2               // x21 = CPU-specific tester base
-
-                // Signal startup
-                mov x0, #0x1000
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
-
-                // Initialize iteration counter
-                mov x22, #0                   // x22 = iteration counter
-
-            main_loop:
-                // Check if we've reached max iterations
-                mov x3, #%d                   // Max iterations
-                cmp x22, x3
-                b.ge test_complete
-
-                // Signal entering main loop
-                mov x0, #0x2000
-                orr x0, x0, x22               // Include iteration count
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
-
-                // Try to get a region to fill
-                mov x0, #1                    // FILL_REQUEST
-                str x0, [x21, #0x00]          // Write to REG_REQUEST
-
-                // Poll for readiness
-            poll_fill:
-                mov x0, #0x3000               // Polling debug message
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
-                
-                ldr x0, [x21, #0x08]          // Read REG_STATUS
-                cmp x0, #1                    // READY?
-                b.eq fill_ready
-                cmp x0, #0                    // BUSY?
-                b.eq try_check                // Try checking instead
-                b poll_fill
-
-            fill_ready:
-                // Get assigned region ID
-                ldr x23, [x21, #0x10]         // Read REG_REGION_ID
-                
-                // Signal starting work
-                mov x0, #0x4000
-                orr x0, x0, x23               // Include region ID
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
-
-                // Fill the region at virtual address - DYNAMIC PAGE COUNT
-                ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR (base)
-                mov x4, #%u                   // Boundary bytes to write at each boundary
-                lsr x4, x4, #3                // Convert bytes to 8-byte words
-                mov x26, #0                   // Page number (starts at 0)
-                mov x19, #%u                  // Number of pages in region (use x19, not x30)
-                
-            fill_page_loop:
-                cmp x26, x19                  // Loop over num_pages (using x19)
-                b.ge fill_done
-                
-                // Calculate page base address: base + (page_num * PAGE_SIZE)
-                mov x27, #1                   // Start with 1
-                lsl x27, x27, #12             // Shift left by 12 to get 0x1000 (4KB)
-                mul x28, x26, x27             // page_offset = page_num * PAGE_SIZE
-                add x29, x3, x28              // page_base = VIRTUAL_TEST_ADDR + page_offset
-                
-                // Call fill_boundary for the start of the page
-                mov x0, x29                   // Arg 1: base address
-                bl fill_boundary
-
-                // Calculate end boundary address
-                mov x6, #1
-                lsl x6, x6, #12               // x6 = 0x1000 (PAGE_SIZE)
-                sub x6, x6, x4, lsl #3        // x6 = 0x1000 - (words * 8)
-                add x0, x29, x6               // end_boundary_addr = page_base + offset
-                
-                // Call fill_boundary for the end of the page
-                bl fill_boundary
-
-            fill_page_next:
-                add x26, x26, #1              // Next page
-                b fill_page_loop
-
-            fill_done:
-                // Signal fill complete
-                mov x0, #1
-                str x0, [x21, #0x18]
-
-                add x22, x22, #1
-                b main_loop
-
-            try_check:
-                // No regions to check - just loop back
-                b main_loop
-
-            test_complete:
-                b end
-
-            end:
-                str x0, [x21, #0x30]
-                wfi
-                b end
-
-            // -------------------------------------------------------------
-            // fill_boundary function
-            //
-            // Fills a memory boundary with an enhanced, verifiable pattern.
-            // Pattern: CPU_ID | REGION_ID | PAGE_NUM | WORD_OFFSET
-            //
-            // Assumed Global Registers (read-only):
-            //   - x20: CPU ID
-            //   - x23: Region ID
-            //   - x26: Current Page Number
-            //   - x4:  Number of 8-byte words to write
-            //
-            // Arguments:
-            //   - x0:  Base address to start writing from
-            //
-            // Clobbered Registers (Temporaries):
-            //   - x5, x6, x7
-            // -------------------------------------------------------------
-            fill_boundary:
-                mov x5, #0                    // x5: Word offset, loop counter
-            fill_boundary_loop:
-                cmp x5, x4                    // Loop for `x4` words
-                b.ge fill_boundary_done
-
-                // --- Start Pattern Generation ---
-                mov x6, #0                    // x6: The final pattern register. Clear before use.
-
-                // 1. CPU ID (bits 63:32)
-                lsl x7, x20, #32              // Shift CPU ID into temp register x7
-                orr x6, x6, x7                // OR into pattern
-
-                // 2. Region ID (bits 31:16)
-                lsl x7, x23, #16              // Shift Region ID into temp register x7
-                orr x6, x6, x7                // OR into pattern
-
-                // 3. Page Number (bits 15:8)
-                lsl x7, x26, #8               // Shift Page Number into temp register x7
-                orr x6, x6, x7                // OR into pattern
-
-                // 4. Word Offset (bits 7:0)
-                orr x6, x6, x5                // OR Word Offset directly into pattern
-
-                // --- End Pattern Generation ---
-
-                // Calculate write address and store the pattern
-                lsl x7, x5, #3                // word_offset_in_bytes = word_offset * 8
-                add x7, x0, x7                // final_addr = base_addr + word_offset_in_bytes
-                
-                // DEBUG: Write the pattern and target address to the debug registers
-                //str x6, [x21, #0x28]
-                //str x7, [x21, #0x30]
-                
-                str x6, [x7]
-
-                add x5, x5, #1                // Increment word offset
-                b fill_boundary_loop
-
-            fill_boundary_done:
-                ret
-        )";
-
-        // Calculate number of pages per region
-        uint32_t num_pages = REGION_SIZE / PAGE_SIZE;
-
-        char main_buf[strlen(MAIN_FIRMWARE) + 1000];
-        std::snprintf(main_buf, sizeof(main_buf), MAIN_FIRMWARE,
-                      TESTER_ADDR,                           // %1: TESTER_ADDR
-                      MAX_ITERATIONS,                        // %2: MAX_ITERATIONS
-                      VIRTUAL_TEST_ADDR,                     // %3: VIRTUAL_TEST_ADDR (fill)
-                      static_cast<unsigned>(BOUNDARY_BYTES), // %4: boundary bytes (fill)
-                      num_pages);                            // %5: number of pages per region
-
-        set_firmware(main_buf, MAIN_FIRMWARE_ADDR);
-
-        SCP_INFO(()) << "Firmware layout completed:";
-        SCP_INFO(()) << "  - Boot loader at 0x" << std::hex << BOOT_ADDR;
-        SCP_INFO(()) << "  - Diagnostic handler at 0x" << std::hex << DIAGNOSTIC_ADDR;
-        SCP_INFO(()) << "  - Main firmware at 0x" << std::hex << MAIN_FIRMWARE_ADDR;
     }
 
     void write_smmu_register(uint32_t addr, uint32_t value)

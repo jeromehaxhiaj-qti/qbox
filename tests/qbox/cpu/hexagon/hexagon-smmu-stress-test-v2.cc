@@ -18,7 +18,6 @@
 #include <libgsutils.h>
 #include <cciutils.h>
 #include <argparser.h>
-#include <keystone/keystone.h>
 #include <tlm_utils/tlm_quantumkeeper.h>
 #include "cci/cfg/cci_broker_if.h"
 #include "sysc/kernel/sc_time.h"
