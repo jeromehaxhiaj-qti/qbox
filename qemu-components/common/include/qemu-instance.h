@@ -180,6 +180,17 @@ protected:
     cci::cci_param<std::string> p_accel;
     cci::cci_param<std::string> p_whpx_args;
 
+    /*
+     * GLib process default main context owner. All the QEMU instances of the
+     * process share it, and QEMU implicitly attaches some of its sources (VNC,
+     * QIO watches...) to it: exactly the instance which uses them must iterate
+     * it, under its own BQL. Mandatory on the instance with VNC enabled; at most
+     * one owner per process.
+     */
+    cci::cci_param<bool> p_default_gcontext_owner;
+    bool m_vnc_enabled = false;
+    static inline const QemuInstance* s_default_gcontext_owner = nullptr;
+
     void push_default_args()
     {
         const size_t l = strlen(name()) + 1;
@@ -327,6 +338,9 @@ public:
         , p_args("qemu_args", "", "additional space separated arguments")
         , p_accel("accel", "tcg", "Virtualization accelerator")
         , p_whpx_args("whpx_args", "", "Additional WHPX accelerator properties (e.g. gicd-base-address=0x17000000)")
+        , p_default_gcontext_owner("default_gcontext_owner", false,
+                                   "This instance main loop iterates the GLib process default main context. "
+                                   "Required on the instance with VNC enabled, at most one instance per process.")
         , p_time_sync_strategy("time_sync_strategy", "quantum_keeper",
                                "QEMU<->SystemC time synchronization strategy: \"quantum_keeper\" (default) uses the "
                                "traditional quantum keeper; \"mcips\" syncs time based on the number of instructions "
@@ -408,6 +422,7 @@ public:
      */
     void set_vnc_args(const std::string& vnc_options)
     {
+            m_vnc_enabled = true;
             m_inst.push_qemu_arg("-vnc");
             m_inst.push_qemu_arg(vnc_options.c_str());
     }
@@ -502,9 +517,37 @@ public:
             SCP_INFO(()) << arg;
         }
 
+        check_default_gcontext_owner();
+        m_inst.set_default_gcontext_owner(p_default_gcontext_owner);
         m_inst.init();
         m_dmi_mgr.init();
     }
+
+private:
+    void check_default_gcontext_owner()
+    {
+        p_default_gcontext_owner.lock();
+
+        if (m_vnc_enabled && !p_default_gcontext_owner) {
+            SCP_FATAL(()) << "VNC is enabled on this QEMU instance, but it is not the GLib default main context "
+                             "owner: set '"
+                          << p_default_gcontext_owner.name() << " = true' in the platform configuration.";
+        }
+
+        if (!p_default_gcontext_owner) {
+            return;
+        }
+
+        if (s_default_gcontext_owner && s_default_gcontext_owner != this) {
+            SCP_FATAL(()) << "Only one QEMU instance may be the GLib default main context owner, but both '"
+                          << s_default_gcontext_owner->name() << "' and '" << name() << "' set '"
+                          << p_default_gcontext_owner.name() << "'.";
+        }
+        s_default_gcontext_owner = this;
+        SCP_INFO(()) << "This instance owns the GLib default main context";
+    }
+
+public:
 
     /**
      * @brief Returns true if the instance is initialized

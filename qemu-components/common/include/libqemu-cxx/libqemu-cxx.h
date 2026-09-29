@@ -97,6 +97,7 @@ private:
     const char* m_lib_path;
     Target m_target;
     bool m_auto_start;
+    bool m_default_gcontext_owner = false;
 
     std::vector<char*> m_qemu_argv;
 
@@ -123,6 +124,12 @@ public:
     void push_qemu_arg(const char* arg);
     void push_qemu_arg(std::initializer_list<const char*> args);
     const std::vector<char*>& get_qemu_args() const { return m_qemu_argv; }
+
+    /*
+     * Make this instance the owner of the GLib process default main context
+     * (see libqemu_set_default_gcontext_owner()). Must be called before init().
+     */
+    void set_default_gcontext_owner(bool owner) { m_default_gcontext_owner = owner; }
 
     void init();
     bool is_inited() const { return m_lib != nullptr; }

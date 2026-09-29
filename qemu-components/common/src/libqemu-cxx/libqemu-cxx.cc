@@ -84,6 +84,14 @@ void LibQemu::init()
         throw InvalidLibraryException(libname, LIBQEMU_INIT_SYM_STR);
     }
 
+    if (m_lib->symbol_exists(LIBQEMU_SET_DEFAULT_GCONTEXT_OWNER_SYM_STR)) {
+        auto set_owner = reinterpret_cast<LibQemuSetDefaultGContextOwnerFct>(
+            m_lib->get_symbol(LIBQEMU_SET_DEFAULT_GCONTEXT_OWNER_SYM_STR));
+        set_owner(m_default_gcontext_owner);
+    } else if (m_default_gcontext_owner) {
+        throw InvalidLibraryException(libname, LIBQEMU_SET_DEFAULT_GCONTEXT_OWNER_SYM_STR);
+    }
+
     qemu_init = reinterpret_cast<LibQemuInitFct>(m_lib->get_symbol(LIBQEMU_INIT_SYM_STR));
     exports = qemu_init(m_qemu_argv.size(), &m_qemu_argv[0]);
 
